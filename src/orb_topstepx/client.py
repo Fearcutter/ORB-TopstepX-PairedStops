@@ -117,46 +117,86 @@ class TopstepXClient:
         ]
 
     def lookup_contract(self, symbol: str) -> Contract:
-        """Resolve a human symbol like 'NQ' to a Contract (with id + tickSize)."""
+        """Resolve a human symbol (e.g. 'NQ' or 'NQM6' or a full ContractId) to
+        an active Contract. ProjectX returns multiple hits for a free-text
+        search; we prefer the exact front-month active contract."""
+        # `live: False` returns the canonical contracts list. `live: True` is
+        # gated behind a live market-data entitlement most accounts don't have.
         resp = self._http.post(
             "/api/Contract/search",
             headers=self._auth_headers(),
-            json={"searchText": symbol, "live": True},
+            json={"searchText": symbol, "live": False},
         )
         self._raise_for_status(resp, "lookup_contract")
         body = resp.json()
-        hits = body.get("contracts") or body.get("data") or []
+        hits = body.get("contracts") or []
         if not hits:
             raise RuntimeError(f"No contract found for symbol '{symbol}'")
-        # Prefer an exact symbol match if present, else first.
-        match = next((c for c in hits if c.get("symbol", "").upper() == symbol.upper()), hits[0])
-        tick = float(match.get("tickSize") or match.get("minTick") or 0.25)
+
+        needle = symbol.upper().strip()
+        active = [c for c in hits if c.get("activeContract")]
+        pool = active or hits
+
+        # Priority order: exact name match > name-prefix match > symbolId ends > first.
+        def _pick() -> dict:
+            for c in pool:
+                if str(c.get("name", "")).upper() == needle:
+                    return c
+            for c in pool:
+                if str(c.get("name", "")).upper().startswith(needle):
+                    return c
+            for c in pool:
+                sid = str(c.get("symbolId", "")).upper()
+                if sid.endswith("." + needle) or sid.endswith(needle):
+                    return c
+            return pool[0]
+
+        match = _pick()
+        tick = float(match.get("tickSize") or 0.25)
         return Contract(
             id=str(match.get("id")),
-            symbol=str(match.get("symbol", symbol)),
+            symbol=str(match.get("name", symbol)),
             tick_size=tick,
             raw=match,
         )
 
     def get_quote(self, contract_id: str) -> Quote:
-        """Snapshot last/bid/ask. If streaming-only in your environment, callers
-        should fall back to reading from the SignalR market-data stream."""
+        """Approximate a last-traded price via the most recent 1-minute bar.
+
+        TopstepX has no REST quote endpoint; bid/ask/last live on the SignalR
+        market-data stream only. Placing a pair only needs a reference price
+        though, so we read the last minute bar's close from /History/retrieveBars.
+
+        Returns bid/ask as None — callers should use `last` as the reference.
+        """
+        from datetime import datetime, timedelta, timezone
         try:
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(minutes=5)
             resp = self._http.post(
-                "/api/Market/quote",
+                "/api/History/retrieveBars",
                 headers=self._auth_headers(),
-                json={"contractId": contract_id},
+                json={
+                    "contractId": contract_id,
+                    "live": False,
+                    "startTime": start.isoformat(),
+                    "endTime": now.isoformat(),
+                    "unit": 2,           # Minute
+                    "unitNumber": 1,
+                    "limit": 5,
+                    "includePartialBar": True,
+                },
             )
             self._raise_for_status(resp, "get_quote")
             body = resp.json()
-            return Quote(
-                last=_maybe_float(body.get("last")),
-                bid=_maybe_float(body.get("bid")),
-                ask=_maybe_float(body.get("ask")),
-            )
-        except RuntimeError:
-            # If this endpoint doesn't exist for your gateway tier, return empty;
-            # the caller can then require a running SignalR market-data feed.
+            bars = body.get("bars") or []
+            if not bars:
+                return Quote(last=None, bid=None, ask=None)
+            # Response is sorted newest-first. Use the most recent bar's close.
+            last = _maybe_float(bars[0].get("c"))
+            return Quote(last=last, bid=None, ask=None)
+        except Exception as ex:
+            logger.warning("get_quote failed: %s", ex)
             return Quote(last=None, bid=None, ask=None)
 
     def place_stop_with_bracket(
@@ -168,24 +208,24 @@ class TopstepXClient:
         stop_price: float,
         tp_ticks: int,
         sl_ticks: int,
-        linked_order_id: Optional[str] = None,
         custom_tag: str = "",
     ) -> dict:
-        """Place a stop-market entry with a take-profit + stop-loss bracket.
-        Returns the placed-order dict; caller reads the id from it."""
+        """Place a stop entry (type=4) with take-profit + stop-loss brackets.
+        Brackets are in ticks from the fill price; ProjectX attaches them as
+        exits that activate when the entry fills. OCO between the two pair
+        legs is NOT handled here — PairManager cancels the partner on fill."""
         payload = {
-            "accountId": account_id,
+            "accountId": int(account_id),
             "contractId": contract_id,
-            "type": 4,  # StopMarket per ProjectX order-type enum
-            "side": 0 if side.upper() == "BUY" else 1,  # 0=Buy, 1=Sell
+            "type": 4,                                   # Stop per ProjectX enum
+            "side": 0 if side.upper() == "BUY" else 1,   # 0=Bid/Buy, 1=Ask/Sell
             "size": size,
             "stopPrice": stop_price,
-            "takeProfitBracket": {"ticks": tp_ticks},
-            "stopLossBracket": {"ticks": sl_ticks},
-            "customTag": custom_tag,
+            "takeProfitBracket": {"ticks": tp_ticks, "type": 1},
+            "stopLossBracket":   {"ticks": sl_ticks, "type": 1},
         }
-        if linked_order_id:
-            payload["linkedOrderId"] = linked_order_id
+        if custom_tag:
+            payload["customTag"] = custom_tag
         resp = self._http.post(
             "/api/Order/place", headers=self._auth_headers(), json=payload
         )
@@ -199,7 +239,7 @@ class TopstepXClient:
         stop_price: Optional[float] = None,
         limit_price: Optional[float] = None,
     ) -> dict:
-        payload = {"accountId": account_id, "orderId": order_id}
+        payload = {"accountId": int(account_id), "orderId": int(order_id)}
         if stop_price is not None:
             payload["stopPrice"] = stop_price
         if limit_price is not None:
@@ -214,7 +254,7 @@ class TopstepXClient:
         resp = self._http.post(
             "/api/Order/cancel",
             headers=self._auth_headers(),
-            json={"accountId": account_id, "orderId": order_id},
+            json={"accountId": int(account_id), "orderId": int(order_id)},
         )
         self._raise_for_status(resp, "cancel_order")
         return resp.json()

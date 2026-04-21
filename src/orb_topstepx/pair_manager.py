@@ -147,7 +147,8 @@ class PairManager:
         pair_id = uuid.uuid4().hex[:8]
         tag_buy = f"{pair_tag_prefix}{pair_id}_BUY"
         tag_sell = f"{pair_tag_prefix}{pair_id}_SELL"
-        link_id = f"{pair_tag_prefix}{pair_id}"  # broker-side OCO link
+        # No broker-side OCO: ProjectX Order/place has no linkedOrderId field.
+        # PairManager handles OCO itself via on_order_event (fill -> cancel partner).
 
         buy_order = None
         try:
@@ -159,7 +160,6 @@ class PairManager:
                 stop_price=buy_px,
                 tp_ticks=tp_ticks,
                 sl_ticks=sl_ticks,
-                linked_order_id=link_id,
                 custom_tag=tag_buy,
             )
         except Exception as ex:
@@ -175,7 +175,6 @@ class PairManager:
                 stop_price=sell_px,
                 tp_ticks=tp_ticks,
                 sl_ticks=sl_ticks,
-                linked_order_id=link_id,
                 custom_tag=tag_sell,
             )
         except Exception as ex:
