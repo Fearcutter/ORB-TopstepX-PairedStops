@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 REST_BASE = "https://api.topstepx.com"
 SIGNALR_HUB = "https://rtc.topstepx.com/hubs/user"
+MARKET_HUB = "https://rtc.topstepx.com/hubs/market"
+
+# Cached live quote is considered fresh for this many seconds. Beyond this,
+# get_quote falls back to bar data.
+QUOTE_FRESH_SECONDS = 10.0
 
 
 # -----------------------------------------------------------------------------
@@ -71,6 +76,15 @@ class TopstepXClient:
         self._http = httpx.Client(base_url=REST_BASE, timeout=timeout)
         self._hub = None
         self._hub_lock = threading.Lock()
+
+        # Market-data hub state. Held separately from the user hub so a user
+        # without a live-data entitlement can still use the order hub.
+        self._market_hub = None
+        self._market_hub_lock = threading.Lock()
+        self._quote_cache: Dict[str, Quote] = {}
+        self._quote_cache_ts: Dict[str, float] = {}
+        self._subscribed_contracts: set = set()
+        self._quote_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Authentication
@@ -161,43 +175,117 @@ class TopstepXClient:
         )
 
     def get_quote(self, contract_id: str) -> Quote:
-        """Approximate a last-traded price via the most recent 1-minute bar.
+        """Return the most recent live quote for a contract.
 
-        TopstepX has no REST quote endpoint; bid/ask/last live on the SignalR
-        market-data stream only. Placing a pair only needs a reference price
-        though, so we read the last minute bar's close from /History/retrieveBars.
+        Policy:
+          1. If our SignalR market-data cache has a quote newer than
+             QUOTE_FRESH_SECONDS, return it. bid/ask/last are all populated.
+          2. Otherwise start (or reuse) a live subscription for this
+             contract so future calls see live data, and fall back to the
+             most recent 1-minute bar close for THIS call.
 
-        Returns bid/ask as None — callers should use `last` as the reference.
+        TopstepX has no REST quote endpoint and second-granularity bars
+        require a live-data entitlement most accounts don't have, so the
+        SignalR market hub is the only real path to sub-minute pricing.
         """
+        # 1. Cache lookup
+        now = time.time()
+        with self._quote_lock:
+            q = self._quote_cache.get(contract_id)
+            ts = self._quote_cache_ts.get(contract_id, 0)
+        if q is not None and (now - ts) < QUOTE_FRESH_SECONDS:
+            return q
+
+        # 2. Ensure subscription is running for next time.
+        try:
+            self.subscribe_contract_quotes(contract_id)
+        except Exception as ex:
+            logger.warning("market quote subscribe failed: %s", ex)
+
+        # 3. One-minute bar fallback for this call.
+        return self._get_quote_bars(contract_id)
+
+    def _get_quote_bars(self, contract_id: str) -> Quote:
         from datetime import datetime, timedelta, timezone
         try:
-            now = datetime.now(timezone.utc)
-            start = now - timedelta(minutes=5)
+            now_dt = datetime.now(timezone.utc)
+            start = now_dt - timedelta(minutes=5)
             resp = self._http.post(
                 "/api/History/retrieveBars",
                 headers=self._auth_headers(),
                 json={
-                    "contractId": contract_id,
-                    "live": False,
-                    "startTime": start.isoformat(),
-                    "endTime": now.isoformat(),
-                    "unit": 2,           # Minute
-                    "unitNumber": 1,
-                    "limit": 5,
-                    "includePartialBar": True,
+                    "contractId": contract_id, "live": False,
+                    "startTime": start.isoformat(), "endTime": now_dt.isoformat(),
+                    "unit": 2, "unitNumber": 1, "limit": 5, "includePartialBar": True,
                 },
             )
-            self._raise_for_status(resp, "get_quote")
-            body = resp.json()
-            bars = body.get("bars") or []
-            if not bars:
-                return Quote(last=None, bid=None, ask=None)
-            # Response is sorted newest-first. Use the most recent bar's close.
-            last = _maybe_float(bars[0].get("c"))
+            bars = resp.json().get("bars") or []
+            last = _maybe_float(bars[0].get("c")) if bars else None
             return Quote(last=last, bid=None, ask=None)
-        except Exception as ex:
-            logger.warning("get_quote failed: %s", ex)
+        except Exception:
             return Quote(last=None, bid=None, ask=None)
+
+    def subscribe_contract_quotes(self, contract_id: str) -> None:
+        """Subscribe to live quotes for a contract on the market-data hub.
+        Idempotent — safe to call repeatedly; only the first call for a
+        given contract actually opens the hub or sends the subscribe."""
+        from signalrcore.hub_connection_builder import HubConnectionBuilder  # lazy import
+
+        self._ensure_token()
+        with self._market_hub_lock:
+            if contract_id in self._subscribed_contracts:
+                return
+
+            if self._market_hub is None:
+                wss = MARKET_HUB.replace("https://", "wss://", 1)
+                full_url = f"{wss}?access_token={self._token}"
+                hub = (
+                    HubConnectionBuilder()
+                    .with_url(full_url, options={
+                        "verify_ssl": True,
+                        "skip_negotiation": True,
+                    })
+                    .with_automatic_reconnect(
+                        {"type": "interval", "keep_alive_interval": 10,
+                         "intervals": [0, 2, 5, 10, 15, 30, 60]}
+                    )
+                    .build()
+                )
+                hub.on_open(lambda: logger.info("Market hub connected."))
+                hub.on_close(lambda: logger.warning("Market hub disconnected."))
+
+                def _on_quote(args):
+                    # args = [contractId, {quote dict}]. Incremental updates
+                    # after the initial snapshot only include CHANGED fields
+                    # (e.g. bid/ask tick updates won't resend lastPrice).
+                    # Merge each update into the cached Quote rather than
+                    # replacing, so we don't lose stale-but-still-valid fields.
+                    if not isinstance(args, list) or len(args) < 2:
+                        return
+                    cid, q = args[0], args[1]
+                    if not isinstance(q, dict):
+                        return
+                    key = str(cid)
+                    new_last = _maybe_float(q.get("lastPrice"))
+                    new_bid  = _maybe_float(q.get("bestBid"))
+                    new_ask  = _maybe_float(q.get("bestAsk"))
+                    with self._quote_lock:
+                        prev = self._quote_cache.get(key)
+                        self._quote_cache[key] = Quote(
+                            last=new_last if new_last is not None else (prev.last if prev else None),
+                            bid=new_bid  if new_bid  is not None else (prev.bid  if prev else None),
+                            ask=new_ask  if new_ask  is not None else (prev.ask  if prev else None),
+                        )
+                        self._quote_cache_ts[key] = time.time()
+
+                hub.on("GatewayQuote", _on_quote)
+                hub.start()
+                self._market_hub = hub
+                time.sleep(0.4)  # let the connection establish before sending
+
+            self._market_hub.send("SubscribeContractQuotes", [contract_id])
+            self._subscribed_contracts.add(contract_id)
+            logger.info("Subscribed to live quotes for %s.", contract_id)
 
     def place_stop_with_bracket(
         self,
@@ -386,6 +474,14 @@ class TopstepXClient:
                 except Exception as ex:
                     logger.warning("SignalR stop error: %s", ex)
                 self._hub = None
+        with self._market_hub_lock:
+            if self._market_hub is not None:
+                try:
+                    self._market_hub.stop()
+                except Exception as ex:
+                    logger.warning("market hub stop error: %s", ex)
+                self._market_hub = None
+            self._subscribed_contracts.clear()
         try:
             self._http.close()
         except Exception:

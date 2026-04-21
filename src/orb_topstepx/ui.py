@@ -153,6 +153,17 @@ class PairedStopsWindow(QMainWindow):
         # the user changes account.
         self._subscribe_current_account()
 
+        # Warm up the live-quote subscription for the configured instrument so
+        # the first Place click gets a fresh price instead of the minute-bar
+        # fallback.
+        try:
+            symbol = self._settings.instrument_name.strip()
+            if symbol:
+                contract = self._client.lookup_contract(symbol)
+                self._client.subscribe_contract_quotes(contract.id)
+        except Exception as ex:
+            logger.warning("Could not warm up quote subscription: %s", ex)
+
         # Session-reset ticker (every 60s on the UI thread).
         self._session_timer = QTimer(self)
         self._session_timer.setInterval(60_000)
