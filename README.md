@@ -1,14 +1,15 @@
 # ORB TopstepX — Paired Stops
 
-Standalone desktop app (Python + PyQt6) that places a linked pair of stop orders on **TopstepX**, keeps them synchronized when you drag either one on the chart, auto-cancels the partner when one fills, and attaches a TP/SL bracket to each entry so exits are on the book immediately at fill time.
+Standalone desktop app (Python + PyQt6) that places a linked pair of stop orders on **TopstepX**, keeps them synchronized when you drag either one on the chart, and auto-cancels the partner when one fills. TP/SL exits are attached automatically on fill (either via your TopstepX Position Brackets or — if you enable Auto OCO Brackets — via the app-supplied TP/SL values).
 
-Behavioral port of the NT8 AddOn at [`Fearcutter/ORB-NT8-Orders-Addon`](https://github.com/Fearcutter/ORB-NT8-Orders-Addon). Trader-assistive tool — you initiate every action; the app just keeps the pair synchronized and submits template-derived exits.
+Behavioral port of the NT8 AddOn at [`Fearcutter/ORB-NT8-Orders-Addon`](https://github.com/Fearcutter/ORB-NT8-Orders-Addon). Trader-assistive tool — you initiate every action; the app keeps the pair in sync and cancels the losing leg on fill.
 
 ## Prerequisites
 
-1. **TopstepX API access.** Enable it in your TopstepX account — it's a paid add-on (typically $14.50/mo for Topstep members). Instructions: https://help.topstepx.com/en/articles/11187768-topstepx-api-access
-2. **API credentials.** Once enabled, generate an API key in the TopstepX settings. You'll need both your **username** and the **API key**.
-3. **Python 3.10+** on the machine you trade from. Topstep's ToS requires automation to run from your own device (no VPS / VPN), so install locally on your trading PC.
+1. **Active TopstepX API subscription** ($14.50/mo for Topstep members). Enable it at https://help.topstepx.com/en/articles/11187768-topstepx-api-access
+2. **API credentials.** Generate an API key in TopstepX → Account Settings → API. Your **username for the API is the email you use to log into Topstep** (not your display name). Verify in TopstepX's Swagger UI if unsure: https://api.topstepx.com/swagger/index.html → `Auth_LoginKey` → Try it out.
+3. **At least one active TopstepX trading account** (Combine / Evaluation / Funded). The API rejects auth without one.
+4. **Python 3.10+** on your trading machine. Topstep's ToS requires automation to run from your own device (no VPS / VPN).
 
 ## Install
 
@@ -16,99 +17,118 @@ Behavioral port of the NT8 AddOn at [`Fearcutter/ORB-NT8-Orders-Addon`](https://
 git clone https://github.com/Fearcutter/ORB-TopstepX-PairedStops.git
 cd ORB-TopstepX-PairedStops
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# mac/linux: source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
 pip install -r requirements.txt
 pip install -e .
 ```
 
 ## Credentials
 
-Copy `.env.example` to `.env` in the project directory and fill in:
+Copy `.env.example` to `.env` (never commit the real file — it's gitignored) and fill in:
 
 ```ini
-TOPSTEPX_USERNAME=your_username
-TOPSTEPX_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TOPSTEPX_USERNAME=your_email@example.com
+TOPSTEPX_API_KEY=<paste 44-char key from TopstepX>
 ```
-
-Or set the same values as system environment variables — they take precedence over the `.env` file.
 
 ## Run
 
-From the project directory with the venv activated:
-
 ```bash
 python -m orb_topstepx
-# or, after pip install -e .:
+# or, if pip install -e . succeeded:
 orb-topstepx
 ```
 
-A small window opens with the form and a status strip at the bottom.
+A compact dark-themed window opens with the form.
 
 ## Settings
 
 | Field | Default | Notes |
 |---|---|---|
-| Account | first one returned | Dropdown from your TopstepX accounts. |
-| Instrument | `NQ` | Symbol; resolved to a contract id on each Place. |
-| Offset (pts) | 10.0 | Distance from last traded price to each stop. Tick-rounded. |
+| Account | first returned | Dropdown of your TopstepX accounts. **See "Switching accounts" below.** |
+| Instrument | `NQ` | Symbol; resolved to a contract id (e.g. `NQM6`) on each Place. Supports MNQ, ES, MES, and most futures. |
+| Offset (pts) | 10.0 | Distance from reference price to each stop. Tick-rounded. |
 | Quantity | 1 | Contracts per leg. |
-| Take Profit (ticks) | 50 | Bracket TP distance from fill (matches IMBA). |
-| Stop Loss (ticks) | 40 | Bracket SL distance from fill (matches IMBA). |
+| Take Profit (ticks) | 50 | Matches IMBA. Attached only if you have Auto OCO Brackets enabled (see below). |
+| Stop Loss (ticks) | 40 | Same as above. |
 
-Settings persist to `%APPDATA%\orb-topstepx\settings.json` (Windows) or `~/.config/orb-topstepx/settings.json`.
+Settings persist to `%APPDATA%\orb-topstepx\settings.json` (Windows) or `~/.config/orb-topstepx/settings.json` (macOS / Linux).
 
-## What it does
+## TP/SL Exit Modes — IMPORTANT
 
-- **Place.** Reads the current quote, computes `buy = last + offset` and `sell = last - offset` (tick-rounded), submits both as stop-market orders **with a native bracket** (TP limit + SL stop attached). Both legs share a `linkedOrderId` so TopstepX's broker-side OCO auto-cancels the partner when one fills.
-- **Drag-sync.** Uses TopstepX's in-place modify endpoint (no cancel-and-recreate). When you drag either stop on the TopstepX chart, the partner moves to preserve the spread. Ping-pong guard suppresses feedback from our own modify.
-- **OCO on fill.** When a leg fills, the broker cancels the partner automatically via the linked-order id. We call cancel defensively on the partner in case your broker environment doesn't honor the link.
-- **Manual cancel.** If you cancel one leg in TopstepX's web UI, our app cancels the partner too.
-- **Session reset.** At 18:00 ET the app clears its internal tracking. Live orders survive broker-side.
+TopstepX has two mutually-exclusive ways exits get attached on fill:
+
+**1. Position Brackets (default for most Topstep users)** — you set TP/SL per contract in your TopstepX UI. On any fill, those defaults auto-attach.
+- App-supplied TP/SL fields are IGNORED.
+- The client detects this and automatically drops bracket fields from the place request so it doesn't fail.
+
+**2. Auto OCO Brackets** — you enable this in TopstepX settings. The app's TP/SL fields control exits per-pair.
+- If both are enabled, the platform rejects placements. Keep only one on.
+
+This app works in either mode. No user configuration required — if the first-try-with-brackets fails with the specific "Position Brackets" error, it silently retries without brackets.
+
+## What the app does
+
+- **Place.** One click. Reads last traded price (from the most recent 1-minute bar on `/History/retrieveBars`), computes `buy = last + offset` and `sell = last - offset`, tick-rounds both, submits two stop-market orders tagged `PAIRSTOP_<id>_{BUY|SELL}`.
+- **Drag-sync.** When you drag either stop on TopstepX's web chart, the partner moves to preserve the original spread. Uses TopstepX's in-place `Order.modify` endpoint — clean, no flicker.
+- **OCO on fill.** When one leg fills, the app cancels the partner (idempotent — TopstepX's broker may have already cancelled it via position-brackets logic).
+- **Manual cancel propagation.** Cancel one leg in the TopstepX web UI → the app cancels the other.
+- **Session reset.** At 18:00 ET the app clears its internal tracking state. Live broker-side orders aren't touched.
 
 ## What it does NOT do
 
-- Does not enter without your click.
-- Does not implement trailing stops, breakeven moves, or scale-outs. Brackets are fixed TP/SL only.
-- Does not re-adopt orders on restart — tags (`PAIRSTOP_<id>_{BUY|SELL}`) let you find them in TopstepX to clean up.
+- Does not enter orders without your click.
+- Does not replicate trailing stops, breakeven moves, or scale-out logic from your ATM template. If those matter to you, use TopstepX Position Brackets to configure them natively.
+- Does not re-adopt orders across app restarts. Pair-tag prefix lets you identify orphaned orders in TopstepX to clean up manually.
 
-## Verification (on a TopstepX practice account)
+## Switching accounts
 
-1. **Auth:** app starts, accounts show in dropdown, status says "SignalR connected".
-2. **Place:** click Place → two stops appear in TopstepX with TP/SL brackets attached, linked via OCO.
-3. **Drag-sync:** drag buy stop up 5 pts on the chart → sell stop follows.
-4. **Fill:** let one leg fill → partner cancels, bracket pair (TP + SL) becomes active on the filled side.
-5. **Manual cancel:** cancel one leg in TopstepX web → partner cancels in our app.
-6. **Rate-limit soak:** drag a stop rapidly ~10x in 2s → confirm no HTTP 429 errors (add debounce if you see them).
-7. **Session reset:** leave running across 18:00 ET → status shows "Session rollover".
-8. **Restart:** close and reopen → tracked state is empty, live orders remain and can be cancelled via the TopstepX UI.
+At startup the app subscribes to SignalR order events for whichever account is selected in the dropdown. If you change the account while running, **restart the app** so the event subscription moves to the new account. The status bar tells you this when you change the dropdown.
 
-Only after all 8 pass on practice should you use this on an evaluation or funded account.
+**Default on first run is your first listed account**, which is often your Combine/Funded — switch to Practice (`PRAC-V2-...`) for initial testing, **restart the app**, then verify the full flow before using on funded accounts.
+
+## Verification on practice
+
+Before using on a funded account, on your `PRAC-V2-...` account:
+
+1. Launch app → status shows `SignalR connected`.
+2. Instrument `NQ`, Offset `10`, Quantity `1`. Click **Place Paired Stops**.
+3. In TopstepX web, confirm two stops appear with the right prices, plus (if Position Brackets is on) exit orders auto-attached.
+4. Drag the buy stop up 5 pts on the chart → sell stop follows within ~1s.
+5. Let one stop fill (with a wide offset it won't — use a tight offset or move prices manually in sim). Partner cancels within 1s; your default TP/SL activate.
+6. Alternate flow — cancel one leg in the web UI → the app cancels the other.
+7. Leave the app running across 18:00 ET → status shows `Session rollover`.
 
 ## Known limitations
 
-- **Fixed TP/SL only.** Trailing, BE, and multi-target ATM features are not replicated. If your template has those, don't rely on this tool to reproduce them.
-- **Switching accounts** requires an app restart (the SignalR subscription is bound to the connected account at startup).
-- **API rate limit** is ~60 req/min (burst 10). Heavy drag activity could hit it.
-- **Drag-sync on TopstepX web chart** depends on the TopstepX UI firing `GatewayUserOrder` events for UI-initiated order drags. If not, drag-sync only works for modifications made via our app (verify on practice).
-- **NQ default.** Change Instrument as the front-month rolls; the app resolves the symbol to a contract at place time.
+- Switching accounts requires an app restart.
+- Rate limit ~60 req/min. Rapid drag activity could hit it.
+- Drag-sync depends on TopstepX firing `GatewayUserOrder` events for UI-initiated chart drags — verified on practice 2026-04-21.
+- Instrument resolves to the active front-month contract (e.g. `NQM6` in April 2026). As the contract rolls, you don't need to change anything — the name is looked up fresh each Place.
 
 ## Prop-firm compliance
 
-Designed as a trader-assistive helper. You initiate every action (button click, order drag); the tool only mirrors one leg to the other and attaches the TP/SL bracket at place time. It does not decide entries, does not trade autonomously, and runs from your device.
+You initiate every action (button click, order drag). The app only mirrors one leg to the other. It does not decide entries, does not trade autonomously, and runs on your own device.
 
-Verify compatibility with your prop firm's rules before using. Some Topstep accounts prohibit any form of automation — check your plan's terms first.
+Some Topstep plans prohibit automation outright — check your plan's terms. This tool is semi-automated (trader-in-the-loop) and designed for plans that permit that.
 
 ## Architecture
 
-- `src/orb_topstepx/price_math.py` — pure tick-rounding math (unit-tested).
-- `src/orb_topstepx/settings.py` — JSON settings + credentials loader.
-- `src/orb_topstepx/client.py` — REST (httpx) + SignalR (signalrcore) wrapper.
-- `src/orb_topstepx/pair_manager.py` — place/cancel/drag-sync/OCO/session-reset core logic.
-- `src/orb_topstepx/ui.py` — PyQt6 window. Dark palette, thread-safe marshalling via `pyqtSignal`.
-- `src/orb_topstepx/main.py` — entry point.
-- `tests/test_price_math.py` — 15 tests for the arithmetic core.
+- `src/orb_topstepx/price_math.py` — pure tick-rounding math (15 pytest cases)
+- `src/orb_topstepx/settings.py` — JSON settings + `.env` credentials loader
+- `src/orb_topstepx/client.py` — REST (httpx) + SignalR (signalrcore) wrapper; includes the bracket auto-fallback
+- `src/orb_topstepx/pair_manager.py` — place / cancel / drag-sync / OCO / session-reset core logic
+- `src/orb_topstepx/ui.py` — PyQt6 `PairedStopsWindow`, dark palette, thread-safe event marshalling via `pyqtSignal`
+- `src/orb_topstepx/main.py` — entry point
+- `tests/test_price_math.py` — 15 tests
+
+All API endpoints, subscription names, and event shapes were verified against live `api.topstepx.com` during development. See `docs/design.md` for the detailed behavior spec.
 
 ## License
 
-TBD. Use at your own risk; this tool executes orders against a funded/evaluation account.
+TBD. Use at your own risk — this tool executes orders against real funded/evaluation accounts.
