@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -69,6 +70,8 @@ class PairedStopsWindow(QMainWindow):
 
         self.setWindowTitle("Paired Stops — TopstepX")
         self.resize(460, 420)
+        if self._settings.always_on_top:
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
         # --- Form ---
         root = QWidget()
@@ -86,6 +89,8 @@ class PairedStopsWindow(QMainWindow):
         self.quantity_edit = QLineEdit(str(self._settings.quantity))
         self.tp_edit = QLineEdit(str(self._settings.take_profit_ticks))
         self.sl_edit = QLineEdit(str(self._settings.stop_loss_ticks))
+        self.always_on_top_cb = QCheckBox()
+        self.always_on_top_cb.setChecked(self._settings.always_on_top)
 
         form.addRow("Account", self.account_combo)
         form.addRow("Instrument", self.instrument_edit)
@@ -93,6 +98,7 @@ class PairedStopsWindow(QMainWindow):
         form.addRow("Quantity", self.quantity_edit)
         form.addRow("Take Profit (ticks)", self.tp_edit)
         form.addRow("Stop Loss (ticks)", self.sl_edit)
+        form.addRow("Always on top", self.always_on_top_cb)
 
         layout.addLayout(form)
 
@@ -122,6 +128,7 @@ class PairedStopsWindow(QMainWindow):
         self.quantity_edit.editingFinished.connect(self._persist_settings)
         self.tp_edit.editingFinished.connect(self._persist_settings)
         self.sl_edit.editingFinished.connect(self._persist_settings)
+        self.always_on_top_cb.stateChanged.connect(self._on_always_on_top_toggled)
 
         # Signals that marshal background-thread events to the UI thread.
         self._order_event_signal.connect(self._handle_order_event_main)
@@ -186,6 +193,15 @@ class PairedStopsWindow(QMainWindow):
             )
         except Exception as ex:
             self._status_signal.emit(f"SignalR subscribe failed: {ex}", True)
+
+    def _on_always_on_top_toggled(self, _state: int) -> None:
+        on = self.always_on_top_cb.isChecked()
+        self._settings.always_on_top = on
+        settings_mod.save(self._settings)
+        # Changing WindowFlags requires re-show. Qt hides the window on
+        # setWindowFlag, so we explicitly show() again afterward.
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+        self.show()
 
     def _on_account_changed(self, _idx: int) -> None:
         acct = self.account_combo.currentText()

@@ -23,6 +23,7 @@ class PairedStopsSettings:
     take_profit_ticks: int = 50      # matches IMBA Target
     stop_loss_ticks: int = 40        # matches IMBA StopLoss
     pair_tag_prefix: str = "PAIRSTOP_"
+    always_on_top: bool = True
 
 
 def _settings_dir() -> Path:
