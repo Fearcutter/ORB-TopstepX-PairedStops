@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orb-topstepx-pairedstops"
+version = "0.0.1"
+description = "Paired stop orders with drag-sync, OCO, and auto TP/SL for TopstepX"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt6>=6.4",
+    "httpx>=0.25",
+    "signalrcore>=0.9.5",
+]
+
+[project.scripts]
+orb-topstepx = "orb_topstepx.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
