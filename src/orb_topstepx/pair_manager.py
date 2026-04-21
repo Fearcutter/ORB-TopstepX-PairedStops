@@ -28,12 +28,16 @@ from .client import TopstepXClient
 logger = logging.getLogger(__name__)
 
 
-# ProjectX order-state enum values (as returned by GatewayUserOrder).
-# Match loosely by name; also accept integer codes where we've confirmed them.
-WORKING_STATES = {"Open", "Working", "Accepted", "ChangeSubmitted", 1, 2}
-FILLED_STATES = {"Filled", 2}
-CANCELLED_STATES = {"Cancelled", "Canceled", 3}
-REJECTED_STATES = {"Rejected", "Expired", 4}
+# ProjectX order-status enum (as returned in GatewayUserOrder events, `status` field).
+# Confirmed from live probe of api.topstepx.com on 2026-04-21:
+#   1 = Working (live on the book; drag-sync path)
+#   2 = Filled  (inferred; triggers OCO on fill)
+#   3 = Cancelled
+#   5, 6 = terminal reject-ish states seen when a placement fails validation
+WORKING_STATES = {1}
+FILLED_STATES = {2}
+CANCELLED_STATES = {3}
+REJECTED_STATES = {4, 5, 6}
 
 
 @dataclass
@@ -246,10 +250,15 @@ class PairManager:
     # SignalR event handler — runs on the SignalR worker thread
     # ------------------------------------------------------------------
     def on_order_event(self, event: dict) -> None:
+        # Event shape per GatewayUserOrder on TopstepX:
+        #   {"id": int, "accountId": int, "contractId": str, "status": int,
+        #    "type": int, "side": int, "size": int, "stopPrice": float, ...}
         order_id = str(event.get("id") or event.get("orderId") or "")
         if not order_id:
             return
-        state_val = event.get("state") or event.get("orderState") or event.get("status")
+        state_val = event.get("status")
+        if state_val is None:
+            state_val = event.get("state") or event.get("orderState")
         stop_price = _maybe_float(event.get("stopPrice"))
 
         with self._lock:
@@ -408,20 +417,16 @@ def _maybe_float(v) -> Optional[float]:
 
 
 def _is_working(state_val) -> bool:
-    return state_val in WORKING_STATES or (isinstance(state_val, str) and state_val in WORKING_STATES)
+    return state_val in WORKING_STATES
 
 
 def _is_filled(state_val) -> bool:
-    return state_val in FILLED_STATES or (isinstance(state_val, str) and state_val == "Filled")
+    return state_val in FILLED_STATES
 
 
 def _is_cancelled(state_val) -> bool:
-    return state_val in CANCELLED_STATES or (
-        isinstance(state_val, str) and state_val.lower() in ("cancelled", "canceled")
-    )
+    return state_val in CANCELLED_STATES
 
 
 def _is_rejected(state_val) -> bool:
-    return state_val in REJECTED_STATES or (
-        isinstance(state_val, str) and state_val.lower() in ("rejected", "expired")
-    )
+    return state_val in REJECTED_STATES

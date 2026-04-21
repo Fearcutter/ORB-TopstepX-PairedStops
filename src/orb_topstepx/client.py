@@ -226,6 +226,26 @@ class TopstepXClient:
         }
         if custom_tag:
             payload["customTag"] = custom_tag
+
+        body = self._post_order(payload)
+
+        # TopstepX refuses API brackets when the account has Position Brackets
+        # (platform-level defaults) on. In that case, resubmit the entry WITHOUT
+        # brackets and let Position Brackets attach exits automatically at fill.
+        # Drop customTag too: the rejected attempt already "reserved" the tag,
+        # and TopstepX enforces tag uniqueness even across failed placements.
+        if (not body.get("success")
+                and _is_position_brackets_conflict(body)):
+            logger.info("Brackets rejected (Position Brackets on) — retrying without brackets.")
+            payload.pop("takeProfitBracket", None)
+            payload.pop("stopLossBracket", None)
+            payload.pop("customTag", None)
+            body = self._post_order(payload)
+
+        self._raise_if_api_failure(body, "place_stop_with_bracket")
+        return body
+
+    def _post_order(self, payload: dict) -> dict:
         resp = self._http.post(
             "/api/Order/place", headers=self._auth_headers(), json=payload
         )
@@ -248,7 +268,9 @@ class TopstepXClient:
             "/api/Order/modify", headers=self._auth_headers(), json=payload
         )
         self._raise_for_status(resp, "modify_order")
-        return resp.json()
+        body = resp.json()
+        self._raise_if_api_failure(body, "modify_order")
+        return body
 
     def cancel_order(self, account_id: str, order_id: str) -> dict:
         resp = self._http.post(
@@ -257,7 +279,9 @@ class TopstepXClient:
             json={"accountId": int(account_id), "orderId": int(order_id)},
         )
         self._raise_for_status(resp, "cancel_order")
-        return resp.json()
+        body = resp.json()
+        self._raise_if_api_failure(body, "cancel_order")
+        return body
 
     # ------------------------------------------------------------------
     # SignalR — order event stream
@@ -271,8 +295,8 @@ class TopstepXClient:
     ) -> None:
         """Start a SignalR connection and subscribe to order events for the
         given account. `on_order` fires on the SignalR worker thread for every
-        GatewayUserOrder event — marshal to the UI thread via pyqtSignal
-        before touching widgets."""
+        GatewayUserOrder event — callers must marshal to the UI thread via
+        a pyqtSignal before touching widgets."""
         from signalrcore.hub_connection_builder import HubConnectionBuilder  # lazy import
 
         self._ensure_token()
@@ -281,25 +305,34 @@ class TopstepXClient:
                 logger.info("SignalR already connected; reusing.")
                 return
 
+            # TopstepX/ProjectX SignalR requires:
+            #   - wss:// URL (not https://)
+            #   - token appended as ?access_token=<jwt> query parameter
+            #   - skip_negotiation = True (the /negotiate endpoint is not used)
+            # signalrcore's access_token_factory option hits the wrong path.
+            wss_url = SIGNALR_HUB.replace("https://", "wss://", 1)
+            full_url = f"{wss_url}?access_token={self._token}"
+
             hub = (
                 HubConnectionBuilder()
-                .with_url(
-                    SIGNALR_HUB,
-                    options={
-                        "access_token_factory": lambda: self._token,
-                        "skip_negotiation": False,
-                    },
-                )
+                .with_url(full_url, options={
+                    "verify_ssl": True,
+                    "skip_negotiation": True,
+                })
                 .with_automatic_reconnect(
                     {"type": "interval", "keep_alive_interval": 10,
-                     "reconnect_interval": 5, "max_attempts": 10}
+                     "intervals": [0, 2, 5, 10, 15, 30, 60]}
                 )
                 .build()
             )
 
+            acct_int = int(account_id)
+
             def _on_open():
-                logger.info("SignalR connected; subscribing.")
-                hub.send("SubscribeOrders", [account_id])
+                logger.info("SignalR connected; subscribing to orders for account %s.", acct_int)
+                # Correct method name per live probe of api.topstepx.com:
+                # `SubscribeOrders` (plural, no "To" prefix) with [accountId].
+                hub.send("SubscribeOrders", [acct_int])
                 if on_connect:
                     on_connect()
 
@@ -310,8 +343,18 @@ class TopstepXClient:
 
             hub.on_open(_on_open)
             hub.on_close(_on_close)
-            # ProjectX emits GatewayUserOrder for order events on this hub.
-            hub.on("GatewayUserOrder", lambda args: on_order(args[0] if args else {}))
+            # ProjectX emits GatewayUserOrder for order events. The handler
+            # receives args=[envelope] where envelope={"action": int, "data": {...order...}}.
+            # We unwrap .data so callers see the order dict directly.
+            def _unwrap(args):
+                if not isinstance(args, list) or not args:
+                    return
+                env = args[0]
+                if isinstance(env, dict) and "data" in env and isinstance(env["data"], dict):
+                    on_order(env["data"])
+                elif isinstance(env, dict):
+                    on_order(env)   # already-unwrapped shape, just in case
+            hub.on("GatewayUserOrder", _unwrap)
 
             hub.start()
             self._hub = hub
@@ -342,6 +385,18 @@ class TopstepXClient:
             body = resp.text[:200]
         raise RuntimeError(f"{label}: HTTP {resp.status_code} — {body!r}")
 
+    @staticmethod
+    def _raise_if_api_failure(body: dict, label: str) -> None:
+        """ProjectX returns HTTP 200 even on business-logic failures. The real
+        result is in the `success` field; we raise with the errorMessage so
+        callers see the actual cause instead of silently accepting a failure."""
+        if not isinstance(body, dict):
+            return
+        if body.get("success") is False:
+            code = body.get("errorCode")
+            msg = body.get("errorMessage") or f"errorCode {code}"
+            raise RuntimeError(f"{label}: {msg}")
+
 
 def _maybe_float(v) -> Optional[float]:
     if v is None:
@@ -351,3 +406,11 @@ def _maybe_float(v) -> Optional[float]:
         return f if f > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _is_position_brackets_conflict(body: dict) -> bool:
+    """TopstepX returns a specific message when Position Brackets is on and we
+    try to attach our own brackets. Detect by both errorCode and message text,
+    since errorCode 2 is used for other things too."""
+    msg = (body.get("errorMessage") or "").lower()
+    return "position brackets" in msg or "auto oco brackets" in msg
