@@ -221,8 +221,11 @@ class TopstepXClient:
             "side": 0 if side.upper() == "BUY" else 1,   # 0=Bid/Buy, 1=Ask/Sell
             "size": size,
             "stopPrice": stop_price,
+            # bracket `type` = ProjectX order-type enum:
+            #   1 = Limit  (correct for take-profit)
+            #   4 = Stop   (correct for stop-loss — server rejects Limit here)
             "takeProfitBracket": {"ticks": tp_ticks, "type": 1},
-            "stopLossBracket":   {"ticks": sl_ticks, "type": 1},
+            "stopLossBracket":   {"ticks": sl_ticks, "type": 4},
         }
         if custom_tag:
             payload["customTag"] = custom_tag
