@@ -214,18 +214,27 @@ class TopstepXClient:
         Brackets are in ticks from the fill price; ProjectX attaches them as
         exits that activate when the entry fills. OCO between the two pair
         legs is NOT handled here — PairManager cancels the partner on fill."""
+        is_buy = side.upper() == "BUY"
+        # Bracket ticks are SIGNED relative to the entry price:
+        #   Long  (buy):  TP above entry → +ticks; SL below entry → −ticks.
+        #   Short (sell): TP below entry → −ticks; SL above entry → +ticks.
+        # Server explicitly rejects the wrong sign with:
+        #   "Invalid stop loss ticks (N). Ticks should be less than zero when longing."
+        tp_signed = abs(tp_ticks) if is_buy else -abs(tp_ticks)
+        sl_signed = -abs(sl_ticks) if is_buy else abs(sl_ticks)
+
         payload = {
             "accountId": int(account_id),
             "contractId": contract_id,
             "type": 4,                                   # Stop per ProjectX enum
-            "side": 0 if side.upper() == "BUY" else 1,   # 0=Bid/Buy, 1=Ask/Sell
+            "side": 0 if is_buy else 1,                  # 0=Bid/Buy, 1=Ask/Sell
             "size": size,
             "stopPrice": stop_price,
             # bracket `type` = ProjectX order-type enum:
             #   1 = Limit  (correct for take-profit)
             #   4 = Stop   (correct for stop-loss — server rejects Limit here)
-            "takeProfitBracket": {"ticks": tp_ticks, "type": 1},
-            "stopLossBracket":   {"ticks": sl_ticks, "type": 4},
+            "takeProfitBracket": {"ticks": tp_signed, "type": 1},
+            "stopLossBracket":   {"ticks": sl_signed, "type": 4},
         }
         if custom_tag:
             payload["customTag"] = custom_tag
