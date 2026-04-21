@@ -355,6 +355,13 @@ class TopstepXClient:
                 elif isinstance(env, dict):
                     on_order(env)   # already-unwrapped shape, just in case
             hub.on("GatewayUserOrder", _unwrap)
+            # TopstepX fires GatewayLogout when another session evicts ours.
+            # Surface it so the user knows why updates stopped.
+            def _on_logout(args):
+                logger.warning("TopstepX forced logout (another session took over): %s", args)
+                if on_disconnect:
+                    on_disconnect()
+            hub.on("GatewayLogout", _on_logout)
 
             hub.start()
             self._hub = hub
@@ -395,6 +402,10 @@ class TopstepXClient:
         if body.get("success") is False:
             code = body.get("errorCode")
             msg = body.get("errorMessage") or f"errorCode {code}"
+            # Surface in terminal too, so users can paste errors without
+            # having to screenshot the status strip.
+            logger.error("%s rejected: errorCode=%s message=%r body=%r",
+                         label, code, msg, body)
             raise RuntimeError(f"{label}: {msg}")
 
 
