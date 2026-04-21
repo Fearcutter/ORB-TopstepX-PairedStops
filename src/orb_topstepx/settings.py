@@ -20,8 +20,8 @@ class PairedStopsSettings:
     instrument_name: str = "NQ"      # user-visible symbol; resolved to contract_id on connect
     offset_points: float = 10.0
     quantity: int = 1
-    take_profit_ticks: int = 50      # matches IMBA Target
-    stop_loss_ticks: int = 40        # matches IMBA StopLoss
+    take_profit_points: float = 12.5  # matches IMBA Target (50 ticks on NQ)
+    stop_loss_points: float = 10.0    # matches IMBA StopLoss (40 ticks on NQ)
     pair_tag_prefix: str = "PAIRSTOP_"
     always_on_top: bool = True
 

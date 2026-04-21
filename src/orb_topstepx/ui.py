@@ -87,8 +87,8 @@ class PairedStopsWindow(QMainWindow):
         self.instrument_edit = QLineEdit(self._settings.instrument_name)
         self.offset_edit = QLineEdit(f"{self._settings.offset_points:g}")
         self.quantity_edit = QLineEdit(str(self._settings.quantity))
-        self.tp_edit = QLineEdit(str(self._settings.take_profit_ticks))
-        self.sl_edit = QLineEdit(str(self._settings.stop_loss_ticks))
+        self.tp_edit = QLineEdit(f"{self._settings.take_profit_points:g}")
+        self.sl_edit = QLineEdit(f"{self._settings.stop_loss_points:g}")
         self.always_on_top_cb = QCheckBox()
         self.always_on_top_cb.setChecked(self._settings.always_on_top)
 
@@ -96,8 +96,8 @@ class PairedStopsWindow(QMainWindow):
         form.addRow("Instrument", self.instrument_edit)
         form.addRow("Offset (pts)", self.offset_edit)
         form.addRow("Quantity", self.quantity_edit)
-        form.addRow("Take Profit (ticks)", self.tp_edit)
-        form.addRow("Stop Loss (ticks)", self.sl_edit)
+        form.addRow("Take Profit (pts)", self.tp_edit)
+        form.addRow("Stop Loss (pts)", self.sl_edit)
         form.addRow("Always on top", self.always_on_top_cb)
 
         layout.addLayout(form)
@@ -226,8 +226,8 @@ class PairedStopsWindow(QMainWindow):
         try:
             offset = float(self.offset_edit.text())
             qty = int(self.quantity_edit.text())
-            tp = int(self.tp_edit.text())
-            sl = int(self.sl_edit.text())
+            tp_pts = float(self.tp_edit.text())
+            sl_pts = float(self.sl_edit.text())
         except ValueError:
             self._set_status("Offset / Quantity / TP / SL must be numbers.", True)
             return
@@ -240,8 +240,8 @@ class PairedStopsWindow(QMainWindow):
             instrument_symbol=self.instrument_edit.text().strip(),
             offset_points=offset,
             quantity=qty,
-            tp_ticks=tp,
-            sl_ticks=sl,
+            tp_points=tp_pts,
+            sl_points=sl_pts,
             pair_tag_prefix=self._settings.pair_tag_prefix,
         )
 
@@ -287,11 +287,11 @@ class PairedStopsWindow(QMainWindow):
         except ValueError:
             pass
         try:
-            self._settings.take_profit_ticks = int(self.tp_edit.text())
+            self._settings.take_profit_points = float(self.tp_edit.text())
         except ValueError:
             pass
         try:
-            self._settings.stop_loss_ticks = int(self.sl_edit.text())
+            self._settings.stop_loss_points = float(self.sl_edit.text())
         except ValueError:
             pass
         settings_mod.save(self._settings)

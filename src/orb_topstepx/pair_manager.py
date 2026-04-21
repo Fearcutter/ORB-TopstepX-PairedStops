@@ -104,8 +104,8 @@ class PairManager:
         instrument_symbol: str,
         offset_points: float,
         quantity: int,
-        tp_ticks: int,
-        sl_ticks: int,
+        tp_points: float,
+        sl_points: float,
         pair_tag_prefix: str,
     ) -> None:
         with self._lock:
@@ -118,8 +118,8 @@ class PairManager:
             if quantity <= 0:
                 self._report("Invalid quantity.", True)
                 return
-            if tp_ticks <= 0 or sl_ticks <= 0:
-                self._report("TP and SL ticks must be positive.", True)
+            if tp_points <= 0 or sl_points <= 0:
+                self._report("TP and SL points must be positive.", True)
                 return
 
         # Calls below block on the network; hold no lock while they run.
@@ -153,6 +153,11 @@ class PairManager:
         tag_sell = f"{pair_tag_prefix}{pair_id}_SELL"
         # No broker-side OCO: ProjectX Order/place has no linkedOrderId field.
         # PairManager handles OCO itself via on_order_event (fill -> cancel partner).
+
+        # Convert user-facing points to the ticks ProjectX expects. Round to
+        # nearest int; e.g. 12.5 pts on NQ (tick 0.25) = 50 ticks.
+        tp_ticks = max(1, round(tp_points / tick))
+        sl_ticks = max(1, round(sl_points / tick))
 
         buy_order = None
         try:
@@ -212,7 +217,7 @@ class PairManager:
             )
         self._report(
             f"Pair active on {contract.symbol}: buy @ {buy_px}, sell @ {sell_px} "
-            f"(TP={tp_ticks}t, SL={sl_ticks}t).",
+            f"(TP={tp_points}pt, SL={sl_points}pt).",
             False,
         )
 
