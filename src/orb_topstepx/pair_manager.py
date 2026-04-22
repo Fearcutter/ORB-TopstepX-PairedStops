@@ -257,7 +257,8 @@ class PairManager:
     def on_order_event(self, event: dict) -> None:
         # Event shape per GatewayUserOrder on TopstepX:
         #   {"id": int, "accountId": int, "contractId": str, "status": int,
-        #    "type": int, "side": int, "size": int, "stopPrice": float, ...}
+        #    "type": int, "side": int, "size": int, "stopPrice": float,
+        #    "fillVolume": int, ...}
         order_id = str(event.get("id") or event.get("orderId") or "")
         if not order_id:
             return
@@ -265,6 +266,8 @@ class PairManager:
         if state_val is None:
             state_val = event.get("state") or event.get("orderState")
         stop_price = _maybe_float(event.get("stopPrice"))
+        fill_volume = event.get("fillVolume") or 0
+        size = event.get("size") or 0
 
         with self._lock:
             if self._programmatic:
@@ -272,6 +275,13 @@ class PairManager:
             snap = self._state
             if snap is None or not snap.contains(order_id):
                 return
+
+            # Log every tracked-order event so we can see exactly what states
+            # TopstepX reports on fill/cancel/modify. Essential diagnostics.
+            logger.info(
+                "event: id=%s status=%s fillVol=%s size=%s stop=%s",
+                order_id, state_val, fill_volume, size, stop_price,
+            )
 
             # Update cached stop prices from incoming event so partner_price is
             # current for anyone downstream.
@@ -281,19 +291,25 @@ class PairManager:
                 else:
                     snap.sell_stop_price = stop_price
 
-        # --- Drag-sync path ---
-        if _is_working(state_val) and stop_price is not None:
-            self._maybe_sync_partner(snap, order_id, stop_price)
-            return
-
-        # --- Filled ---
-        if _is_filled(state_val):
+        # --- Filled (check FIRST) ---
+        # Robust fill detection: either the status code says Filled, OR the
+        # fillVolume has reached the order size. The fillVolume path catches
+        # fills even if TopstepX reports a different status code than our
+        # enum expects. A filled order with status != FILLED should never
+        # match the "working" drag-sync path below because fill_volume>=size
+        # is the strictest signal.
+        if _is_filled(state_val) or (size > 0 and fill_volume >= size):
             self._on_filled(snap, order_id)
             return
 
         # --- Manual cancel / rejection ---
         if _is_cancelled(state_val) or _is_rejected(state_val):
             self._on_cancel_or_reject(snap, order_id, state_val)
+            return
+
+        # --- Drag-sync path ---
+        if _is_working(state_val) and stop_price is not None:
+            self._maybe_sync_partner(snap, order_id, stop_price)
             return
 
     # ------------------------------------------------------------------

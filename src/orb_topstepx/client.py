@@ -429,10 +429,11 @@ class TopstepXClient:
             acct_int = int(account_id)
 
             def _on_open():
-                logger.info("SignalR connected; subscribing to orders for account %s.", acct_int)
-                # Correct method name per live probe of api.topstepx.com:
-                # `SubscribeOrders` (plural, no "To" prefix) with [accountId].
+                logger.info("SignalR connected; subscribing to orders+trades for account %s.", acct_int)
+                # Correct method names per live probe of api.topstepx.com:
+                # `SubscribeOrders` and `SubscribeTrades` (plural, no "To" prefix).
                 hub.send("SubscribeOrders", [acct_int])
+                hub.send("SubscribeTrades", [acct_int])
                 if on_connect:
                     on_connect()
 
@@ -455,6 +456,33 @@ class TopstepXClient:
                 elif isinstance(env, dict):
                     on_order(env)   # already-unwrapped shape, just in case
             hub.on("GatewayUserOrder", _unwrap)
+
+            # GatewayUserTrade fires on every execution. It contains the
+            # orderId that was filled — a redundant, reliable path for OCO
+            # detection alongside order-status updates.
+            def _unwrap_trade(args):
+                if not isinstance(args, list) or not args:
+                    return
+                env = args[0]
+                if isinstance(env, dict):
+                    payload = env.get("data") if "data" in env else env
+                    if isinstance(payload, dict):
+                        # Normalize the payload to look like an order-fill event
+                        # so PairManager's on_order_event can handle it uniformly:
+                        # {"id": orderId, "status": FILLED_SENTINEL, "size": qty,
+                        #  "fillVolume": qty}
+                        synth = {
+                            "id": payload.get("orderId") or payload.get("id"),
+                            "status": 2,                 # our FILLED sentinel
+                            "size": payload.get("size") or 1,
+                            "fillVolume": payload.get("size") or 1,
+                            "_source": "trade",
+                        }
+                        if synth["id"]:
+                            on_order(synth)
+
+            hub.on("GatewayUserTrade", _unwrap_trade)
+
             # TopstepX fires GatewayLogout when another session evicts ours.
             # Surface it so the user knows why updates stopped.
             def _on_logout(args):
