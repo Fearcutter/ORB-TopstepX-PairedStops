@@ -448,6 +448,7 @@ class TopstepXClient:
             # receives args=[envelope] where envelope={"action": int, "data": {...order...}}.
             # We unwrap .data so callers see the order dict directly.
             def _unwrap(args):
+                logger.info("raw GatewayUserOrder: %s", args)
                 if not isinstance(args, list) or not args:
                     return
                 env = args[0]
@@ -461,6 +462,7 @@ class TopstepXClient:
             # orderId that was filled — a redundant, reliable path for OCO
             # detection alongside order-status updates.
             def _unwrap_trade(args):
+                logger.info("raw GatewayUserTrade: %s", args)
                 if not isinstance(args, list) or not args:
                     return
                 env = args[0]

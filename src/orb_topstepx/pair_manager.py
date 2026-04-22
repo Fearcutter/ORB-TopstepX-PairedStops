@@ -261,6 +261,7 @@ class PairManager:
         #    "fillVolume": int, ...}
         order_id = str(event.get("id") or event.get("orderId") or "")
         if not order_id:
+            logger.info("on_order_event: skip, no order_id in %s", event)
             return
         state_val = event.get("status")
         if state_val is None:
@@ -271,9 +272,17 @@ class PairManager:
 
         with self._lock:
             if self._programmatic:
+                logger.info("on_order_event: skip (programmatic) id=%s", order_id)
                 return
             snap = self._state
-            if snap is None or not snap.contains(order_id):
+            if snap is None:
+                logger.info("on_order_event: skip (no active pair) id=%s status=%s fillVol=%s", order_id, state_val, fill_volume)
+                return
+            if not snap.contains(order_id):
+                logger.info(
+                    "on_order_event: skip (untracked) id=%s tracked=(buy=%s, sell=%s) status=%s fillVol=%s",
+                    order_id, snap.buy_order_id, snap.sell_order_id, state_val, fill_volume,
+                )
                 return
 
             # Log every tracked-order event so we can see exactly what states
