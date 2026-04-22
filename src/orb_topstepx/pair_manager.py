@@ -104,8 +104,6 @@ class PairManager:
         instrument_symbol: str,
         offset_points: float,
         quantity: int,
-        tp_points: float,
-        sl_points: float,
         pair_tag_prefix: str,
     ) -> None:
         with self._lock:
@@ -117,9 +115,6 @@ class PairManager:
                 return
             if quantity <= 0:
                 self._report("Invalid quantity.", True)
-                return
-            if tp_points <= 0 or sl_points <= 0:
-                self._report("TP and SL points must be positive.", True)
                 return
 
         # Calls below block on the network; hold no lock while they run.
@@ -154,21 +149,14 @@ class PairManager:
         # No broker-side OCO: ProjectX Order/place has no linkedOrderId field.
         # PairManager handles OCO itself via on_order_event (fill -> cancel partner).
 
-        # Convert user-facing points to the ticks ProjectX expects. Round to
-        # nearest int; e.g. 12.5 pts on NQ (tick 0.25) = 50 ticks.
-        tp_ticks = max(1, round(tp_points / tick))
-        sl_ticks = max(1, round(sl_points / tick))
-
         buy_order = None
         try:
-            buy_order = self._client.place_stop_with_bracket(
+            buy_order = self._client.place_stop(
                 account_id=account_id,
                 contract_id=contract.id,
                 side="BUY",
                 size=quantity,
                 stop_price=buy_px,
-                tp_ticks=tp_ticks,
-                sl_ticks=sl_ticks,
                 custom_tag=tag_buy,
             )
         except Exception as ex:
@@ -176,14 +164,12 @@ class PairManager:
             return
 
         try:
-            sell_order = self._client.place_stop_with_bracket(
+            sell_order = self._client.place_stop(
                 account_id=account_id,
                 contract_id=contract.id,
                 side="SELL",
                 size=quantity,
                 stop_price=sell_px,
-                tp_ticks=tp_ticks,
-                sl_ticks=sl_ticks,
                 custom_tag=tag_sell,
             )
         except Exception as ex:
@@ -216,8 +202,8 @@ class PairManager:
                 expected_spread=buy_px - sell_px,
             )
         self._report(
-            f"Pair active on {contract.symbol}: buy @ {buy_px}, sell @ {sell_px} "
-            f"(TP={tp_points}pt, SL={sl_points}pt).",
+            f"Pair active on {contract.symbol}: buy @ {buy_px}, sell @ {sell_px}. "
+            f"TP/SL will attach automatically via Position Brackets on fill.",
             False,
         )
 

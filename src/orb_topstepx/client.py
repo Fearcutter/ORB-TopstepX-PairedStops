@@ -287,70 +287,41 @@ class TopstepXClient:
             self._subscribed_contracts.add(contract_id)
             logger.info("Subscribed to live quotes for %s.", contract_id)
 
-    def place_stop_with_bracket(
+    def place_stop(
         self,
         account_id: str,
         contract_id: str,
         side: str,   # "BUY" or "SELL"
         size: int,
         stop_price: float,
-        tp_ticks: int,
-        sl_ticks: int,
         custom_tag: str = "",
     ) -> dict:
-        """Place a stop entry (type=4) with take-profit + stop-loss brackets.
-        Brackets are in ticks from the fill price; ProjectX attaches them as
-        exits that activate when the entry fills. OCO between the two pair
-        legs is NOT handled here — PairManager cancels the partner on fill."""
-        is_buy = side.upper() == "BUY"
-        # Bracket ticks are SIGNED relative to the entry price:
-        #   Long  (buy):  TP above entry → +ticks; SL below entry → −ticks.
-        #   Short (sell): TP below entry → −ticks; SL above entry → +ticks.
-        # Server explicitly rejects the wrong sign with:
-        #   "Invalid stop loss ticks (N). Ticks should be less than zero when longing."
-        tp_signed = abs(tp_ticks) if is_buy else -abs(tp_ticks)
-        sl_signed = -abs(sl_ticks) if is_buy else abs(sl_ticks)
+        """Place a stop entry (type=4) with NO brackets attached.
 
+        Exits are delegated to the account's Position Brackets — TopstepX's
+        per-contract platform-level defaults, which attach TP/SL automatically
+        when the entry fills. This is cleaner than API-supplied Auto OCO
+        Brackets because nothing renders on the chart until after the fill,
+        avoiding the visual stacking of un-priced pending bracket orders.
+        """
         payload = {
             "accountId": int(account_id),
             "contractId": contract_id,
             "type": 4,                                   # Stop per ProjectX enum
-            "side": 0 if is_buy else 1,                  # 0=Bid/Buy, 1=Ask/Sell
+            "side": 0 if side.upper() == "BUY" else 1,   # 0=Bid/Buy, 1=Ask/Sell
             "size": size,
             "stopPrice": stop_price,
-            # bracket `type` = ProjectX order-type enum:
-            #   1 = Limit  (correct for take-profit)
-            #   4 = Stop   (correct for stop-loss — server rejects Limit here)
-            "takeProfitBracket": {"ticks": tp_signed, "type": 1},
-            "stopLossBracket":   {"ticks": sl_signed, "type": 4},
         }
         if custom_tag:
             payload["customTag"] = custom_tag
 
-        body = self._post_order(payload)
-
-        # TopstepX refuses API brackets when the account has Position Brackets
-        # (platform-level defaults) on. In that case, resubmit the entry WITHOUT
-        # brackets and let Position Brackets attach exits automatically at fill.
-        # Drop customTag too: the rejected attempt already "reserved" the tag,
-        # and TopstepX enforces tag uniqueness even across failed placements.
-        if (not body.get("success")
-                and _is_position_brackets_conflict(body)):
-            logger.info("Brackets rejected (Position Brackets on) — retrying without brackets.")
-            payload.pop("takeProfitBracket", None)
-            payload.pop("stopLossBracket", None)
-            payload.pop("customTag", None)
-            body = self._post_order(payload)
-
-        self._raise_if_api_failure(body, "place_stop_with_bracket")
-        return body
-
-    def _post_order(self, payload: dict) -> dict:
         resp = self._http.post(
             "/api/Order/place", headers=self._auth_headers(), json=payload
         )
-        self._raise_for_status(resp, "place_stop_with_bracket")
-        return resp.json()
+        self._raise_for_status(resp, "place_stop")
+        body = resp.json()
+        self._raise_if_api_failure(body, "place_stop")
+        return body
 
     def modify_order(
         self,
@@ -557,9 +528,3 @@ def _maybe_float(v) -> Optional[float]:
         return None
 
 
-def _is_position_brackets_conflict(body: dict) -> bool:
-    """TopstepX returns a specific message when Position Brackets is on and we
-    try to attach our own brackets. Detect by both errorCode and message text,
-    since errorCode 2 is used for other things too."""
-    msg = (body.get("errorMessage") or "").lower()
-    return "position brackets" in msg or "auto oco brackets" in msg

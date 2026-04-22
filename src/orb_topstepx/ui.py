@@ -87,8 +87,6 @@ class PairedStopsWindow(QMainWindow):
         self.instrument_edit = QLineEdit(self._settings.instrument_name)
         self.offset_edit = QLineEdit(f"{self._settings.offset_points:g}")
         self.quantity_edit = QLineEdit(str(self._settings.quantity))
-        self.tp_edit = QLineEdit(f"{self._settings.take_profit_points:g}")
-        self.sl_edit = QLineEdit(f"{self._settings.stop_loss_points:g}")
         self.always_on_top_cb = QCheckBox()
         self.always_on_top_cb.setChecked(self._settings.always_on_top)
 
@@ -96,8 +94,6 @@ class PairedStopsWindow(QMainWindow):
         form.addRow("Instrument", self.instrument_edit)
         form.addRow("Offset (pts)", self.offset_edit)
         form.addRow("Quantity", self.quantity_edit)
-        form.addRow("Take Profit (pts)", self.tp_edit)
-        form.addRow("Stop Loss (pts)", self.sl_edit)
         form.addRow("Always on top", self.always_on_top_cb)
 
         layout.addLayout(form)
@@ -126,8 +122,6 @@ class PairedStopsWindow(QMainWindow):
         self.instrument_edit.editingFinished.connect(self._persist_settings)
         self.offset_edit.editingFinished.connect(self._persist_settings)
         self.quantity_edit.editingFinished.connect(self._persist_settings)
-        self.tp_edit.editingFinished.connect(self._persist_settings)
-        self.sl_edit.editingFinished.connect(self._persist_settings)
         self.always_on_top_cb.stateChanged.connect(self._on_always_on_top_toggled)
 
         # Signals that marshal background-thread events to the UI thread.
@@ -237,10 +231,8 @@ class PairedStopsWindow(QMainWindow):
         try:
             offset = float(self.offset_edit.text())
             qty = int(self.quantity_edit.text())
-            tp_pts = float(self.tp_edit.text())
-            sl_pts = float(self.sl_edit.text())
         except ValueError:
-            self._set_status("Offset / Quantity / TP / SL must be numbers.", True)
+            self._set_status("Offset and Quantity must be numbers.", True)
             return
 
         self._persist_settings()
@@ -251,8 +243,6 @@ class PairedStopsWindow(QMainWindow):
             instrument_symbol=self.instrument_edit.text().strip(),
             offset_points=offset,
             quantity=qty,
-            tp_points=tp_pts,
-            sl_points=sl_pts,
             pair_tag_prefix=self._settings.pair_tag_prefix,
         )
 
@@ -295,14 +285,6 @@ class PairedStopsWindow(QMainWindow):
             pass
         try:
             self._settings.quantity = int(self.quantity_edit.text())
-        except ValueError:
-            pass
-        try:
-            self._settings.take_profit_points = float(self.tp_edit.text())
-        except ValueError:
-            pass
-        try:
-            self._settings.stop_loss_points = float(self.sl_edit.text())
         except ValueError:
             pass
         settings_mod.save(self._settings)
