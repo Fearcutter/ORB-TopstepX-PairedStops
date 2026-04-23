@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orb-topstepx-pairedstops"
-version = "0.1.1"
+version = "0.1.2"
 description = "Paired stop orders with drag-sync, OCO, and auto TP/SL for TopstepX"
 readme = "README.md"
 requires-python = ">=3.9"
